@@ -25,7 +25,7 @@ texts = text_splitter.create_documents([text])
 splits = [item.page_content for item in texts]
 
 # Your API info
-BENTO_EMBEDDING_MODEL_END_POINT = "https://sentence-transformers-zflz-f708c846.mt-guc1.bentoml.ai"
+BENTO_EMBEDDING_MODEL_END_POINT = "https://experimental1.cloud.bentoml.com"
 BENTO_API_TOKEN = "d07nfife4f40uibesu9g"
 
 all_embeddings = []
@@ -160,7 +160,7 @@ relevant_docs = get_relevant_docs(milvus_client, collection_name, message, 1)
 
 import bentoml
 
-llm_client = bentoml.SyncHTTPClient(BENTO_EMBEDDING_MODEL_END_POINT, token=BENTO_API_TOKEN, server_ready_timeout=60)
+llm_client = bentoml.SyncHTTPClient(BENTO_EMBEDDING_MODEL_END_POINT, token=BENTO_API_TOKEN)
 
 def dorag(question: str, context: str):
    # Define the prompt template
