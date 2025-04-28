@@ -3,6 +3,12 @@ from langchain_text_splitters import CharacterTextSplitter
 
 from embeddings import get_embeddings
 
+import os
+from dotenv import load_dotenv
+
+# Load variables from .env file
+load_dotenv()
+
 loader = WikipediaLoader(query="Jaffa cake")
 
 # Load the documents
@@ -25,8 +31,8 @@ texts = text_splitter.create_documents([text])
 splits = [item.page_content for item in texts]
 
 # Your API info
-BENTO_EMBEDDING_MODEL_END_POINT = "https://experimental1.cloud.bentoml.com"
-BENTO_API_TOKEN = "d07nfife4f40uibesu9g"
+BENTO_EMBEDDING_MODEL_END_POINT = os.getenv("BENTO_EMBEDDING_MODEL_END_POINT")
+BENTO_API_TOKEN = os.getenv("BENTO_API_TOKEN")
 
 all_embeddings = []
 # Pass the splits in a batch of 25
@@ -49,8 +55,8 @@ df = pd.DataFrame({
 print(df.head())
 
 # Zilliz cluster credentials
-user = "db_ecebf22e0fa90a7"
-password = "Sq8%MKx!2h3/S6j*"
+user = os.getenv("user")
+password = os.getenv("password")
 
 # [example]
 # uri = https://in03-ecebf22e0fa90a7.serverless.gcp-us-west1.cloud.zilliz.com
