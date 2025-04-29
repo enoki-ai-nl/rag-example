@@ -14,9 +14,7 @@ logger = logging.getLogger(__name__)
 # Load variables from .env file
 load_dotenv()
 
-# Check for required environment variables and provide defaults
-BENTO_EMBEDDING_MODEL_END_POINT = os.getenv("BENTO_EMBEDDING_MODEL_END_POINT")
-BENTO_API_TOKEN = os.getenv("BENTO_API_TOKEN")
+# Get Milvus credentials from environment
 MILVUS_URI = os.getenv("MILVUS_URI", "https://in03-ecebf22e0fa90a7.serverless.gcp-us-west1.cloud.zilliz.com")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN")
 
@@ -36,7 +34,7 @@ if docs:
     logger.info(f"Summary: {docs[0].metadata.get('summary', 'No summary')} (Source: {docs[0].metadata.get('source', 'Unknown')})")
 
 # Split the text into chunks
-text = ' '.join([page.page_content.replace('\\t', ' ') for page in docs])
+text = ' '.join([page.page_content.replace('\t', ' ') for page in docs])
 text_splitter = CharacterTextSplitter(
     separator="\n",
     chunk_size=1000,
@@ -49,21 +47,24 @@ texts = text_splitter.create_documents([text])
 splits = [item.page_content for item in texts]
 logger.info(f"Split text into {len(splits)} chunks")
 
-# Get embeddings with fallback
-logger.info("Generating embeddings...")
+# Generate embeddings using the local SentenceTransformer model
 try:
+    logger.info("Generating embeddings using SentenceTransformer...")
+    # Use batching to avoid memory issues
     all_embeddings = []
-    # Pass the splits in a batch of 25
-    for i in range(0, len(splits), 25):
-        batch = splits[i:i+25]
-        # Try to use BentoML if configured, otherwise fall back to local SentenceTransformer
-        embeddings_batch = get_embeddings(batch, BENTO_EMBEDDING_MODEL_END_POINT, BENTO_API_TOKEN)
+    batch_size = 25
+    
+    # Generate embeddings in batches
+    for i in range(0, len(splits), batch_size):
+        batch = splits[i:i+batch_size]
+        logger.info(f"Processing batch {i//batch_size + 1}/{(len(splits) + batch_size - 1)//batch_size}")
+        embeddings_batch = get_embeddings(batch)
         all_embeddings.extend(embeddings_batch)
+    
     logger.info(f"Generated embeddings for {len(all_embeddings)} chunks")
 except Exception as e:
     logger.error(f"Error generating embeddings: {e}")
-    logger.info("Falling back to local SentenceTransformer model")
-    all_embeddings = get_embeddings(splits)  # This will use the local model as fallback
+    sys.exit(1)
 
 # Create a DataFrame to store the splits and embeddings
 import pandas as pd
@@ -151,16 +152,18 @@ def insert_data_to_milvus(client, collection_name, splits, all_embeddings):
 # Search function for retrieving relevant documents
 def get_relevant_docs(client, collection_name, user_query, top_k=8):
     try:
-        # Get query embedding - use the same method as for document embeddings
-        query_embedding = get_embeddings([user_query], BENTO_EMBEDDING_MODEL_END_POINT, BENTO_API_TOKEN)[0]
+        # Generate embedding for the query using the same embedding function
+        logger.info(f"Generating embedding for query: {user_query}")
+        query_embedding = get_embeddings([user_query])[0]
         
         # Search parameters
         search_params = {
-            "metric_type": "COSINE",  # Match your index metric type
-            "params": {"nprobe": 10}  # Adjust based on your index type
+            "metric_type": "COSINE",
+            "params": {"nprobe": 10}
         }
         
         # Perform the search
+        logger.info(f"Searching Milvus for top {top_k} relevant documents")
         results = client.search(
             collection_name=collection_name,
             data=[query_embedding],
@@ -172,8 +175,12 @@ def get_relevant_docs(client, collection_name, user_query, top_k=8):
         
         # Combine results into a single document
         relevant_docs = ""
-        for hit in results[0]:  # First query's results
-            relevant_docs += hit["entity"]["page_content"] + " "
+        if results and len(results) > 0 and len(results[0]) > 0:
+            for hit in results[0]:  # First query's results
+                relevant_docs += hit["entity"]["page_content"] + " "
+            logger.info(f"Found {len(results[0])} relevant documents")
+        else:
+            logger.info("No search results returned")
         
         return relevant_docs
     except Exception as e:
@@ -184,61 +191,64 @@ def get_relevant_docs(client, collection_name, user_query, top_k=8):
 total_inserted = insert_data_to_milvus(milvus_client, collection_name, splits, all_embeddings)
 logger.info(f"Inserted {total_inserted} documents into Milvus")
 
-# Function to generate response using LLM
-def generate_response(question, context):
+# Function to answer using the retrieved content
+def answer_from_context(question, context):
     try:
-        import bentoml
+        from transformers import pipeline
         
-        # Check if we have BentoML credentials
-        if BENTO_EMBEDDING_MODEL_END_POINT and BENTO_API_TOKEN:
-            logger.info("Using BentoML for response generation")
-            llm_client = bentoml.SyncHTTPClient(BENTO_EMBEDDING_MODEL_END_POINT, token=BENTO_API_TOKEN)
-            
-            # Define the prompt template
-            prompt = (f"You are a helpful assistant. The user has a question. Answer the user question based only on the context: {context}. \n"
-                     f"The user question is {question}")
-            
-            # Call the LLM endpoint with the prompt
-            results = llm_client.generate(
-                max_tokens=1024,
-                prompt=prompt,
-            )
-            
-            res = ""
-            for result in results:
-                res += result
-            return res
+        # Use a QA pipeline as a simple way to answer questions
+        logger.info("Initializing QA pipeline...")
+        qa_pipeline = pipeline("question-answering")
+        
+        # Use the pipeline to answer the question
+        if context:
+            logger.info("Generating answer from context...")
+            answer = qa_pipeline(question=question, context=context[:4000])  # Limit context to avoid token limit issues
+            return answer["answer"]
         else:
-            logger.warning("BentoML credentials not available for response generation")
-            return f"I found relevant information but couldn't generate a response. Here's what I found: {context[:500]}..."
+            return "I couldn't find relevant information to answer that question."
     except Exception as e:
-        logger.error(f"Error generating response: {e}")
-        return f"Sorry, I couldn't generate a response due to an error. Here's what I found: {context[:500]}..."
+        logger.error(f"Error generating answer: {e}")
+        # Install transformers if not present
+        if "No module named 'transformers'" in str(e):
+            logger.info("Installing transformers package...")
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers"])
+            try:
+                from transformers import pipeline
+                qa_pipeline = pipeline("question-answering")
+                if context:
+                    answer = qa_pipeline(question=question, context=context[:4000])
+                    return answer["answer"]
+            except Exception as new_e:
+                logger.error(f"Error after installing transformers: {new_e}")
+        
+        # Return a portion of the context if we can't use the QA pipeline
+        if context:
+            return f"Here's what I found: {context[:500]}..."
+        else:
+            return "I couldn't find relevant information to answer that question."
 
-# Example query
+# Example queries
 example_queries = [
+"How many calories are in a jaffa cake?",
     "What are cakes similar to jaffa cakes?",
-    "How many calories are in a jaffa cake?",
-    "What are the main ingredients of a jaffa cake?",
+    "What is a jaffa cake?",
+    "Are jaffa cakes cookies or cakes?",
+
 ]
 
 for query in example_queries:
     logger.info(f"\nProcessing query: {query}")
+    
+    # Get relevant documents
     relevant_docs = get_relevant_docs(milvus_client, collection_name, query, top_k=3)
     
     if relevant_docs:
         logger.info(f"Found relevant documents ({len(relevant_docs)} characters)")
         
-        # Try to generate a response if BentoML is available
-        if BENTO_EMBEDDING_MODEL_END_POINT and BENTO_API_TOKEN:
-            try:
-                response = generate_response(query, relevant_docs)
-                logger.info(f"Generated response: {response}")
-            except Exception as e:
-                logger.error(f"Failed to generate response: {e}")
-                logger.info(f"Relevant context: {relevant_docs[:500]}...")
-        else:
-            logger.info("BentoML not configured, skipping response generation")
-            logger.info(f"Relevant context: {relevant_docs[:500]}...")
+        # Generate an answer
+        answer = answer_from_context(query, relevant_docs)
+        logger.info(f"Answer: {answer}")
     else:
         logger.info("No relevant documents found")
